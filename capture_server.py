@@ -31,6 +31,10 @@ def trace_snapshot(trace):
     return (len(entries), sum(path.stat().st_size for path in entries), max((path.stat().st_mtime_ns for path in entries), default=0))
 
 
+def has_xcode_index(trace):
+    return all((trace / name).is_file() and (trace / name).stat().st_size > 0 for name in ("index", "capture", "metadata"))
+
+
 def wait_until_complete(trace):
     previous = None
     stable_samples = 0
@@ -38,7 +42,7 @@ def wait_until_complete(trace):
     while time.monotonic() < deadline:
         snapshot = trace_snapshot(trace)
         stable_samples = stable_samples + 1 if snapshot == previous else 0
-        if stable_samples >= 4:  # two seconds unchanged after WebKit stops capture
+        if has_xcode_index(trace) and stable_samples >= 10:  # Five quiet seconds, with Xcode's required index files.
             return True
         previous = snapshot
         time.sleep(.5)
@@ -122,6 +126,10 @@ class Handler(SimpleHTTPRequestHandler):
         name = f"capture-{datetime.now().strftime('%Y%m%d-%H%M%S')}.gputrace"
         staging = CAPTURES / f".{name}.partial"
         shutil.copytree(trace, staging)
+        if not has_xcode_index(staging):
+            shutil.rmtree(staging)
+            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Trace finished without an Xcode index."})
+            return
         staging.replace(CAPTURES / name)  # Xcode can only see a completed trace.
         self.send_json(HTTPStatus.OK, {"name": name, "path": str((CAPTURES / name).resolve())})
 
