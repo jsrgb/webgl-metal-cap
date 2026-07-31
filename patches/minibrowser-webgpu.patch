@@ -1,0 +1,26 @@
+diff --git a/Tools/MiniBrowser/mac/AppDelegate.m b/Tools/MiniBrowser/mac/AppDelegate.m
+index b1f89ff038..e77107b08c 100644
+--- a/Tools/MiniBrowser/mac/AppDelegate.m
++++ b/Tools/MiniBrowser/mac/AppDelegate.m
+@@ -32,6 +32,7 @@
+ #import <UserNotifications/UNNotificationContent.h>
+ #import <UserNotifications/UserNotifications.h>
+ #import <WebKit/WKPreferencesPrivate.h>
++#import <WebKit/_WKExperimentalFeature.h>
+ #import <WebKit/WKProcessPoolPrivate.h>
+ #import <WebKit/WKUserContentControllerPrivate.h>
+ #import <WebKit/WKWebViewConfigurationPrivate.h>
+@@ -305,6 +306,13 @@ - (WKWebViewConfiguration *)defaultConfiguration
+             [configuration.preferences _setEnabled:enabledForFeature(feature) forFeature:feature];
+         }
+ 
++        // This local MiniBrowser is dedicated to offline Metal trace capture.
++        // The WebGPU submit path provides the capture trigger for WebGL work.
++        for (_WKExperimentalFeature *feature in WKPreferences._experimentalFeatures) {
++            if ([feature.key isEqualToString:@"WebGPUEnabled"])
++                [configuration.preferences _setEnabled:YES forExperimentalFeature:feature];
++        }
++
+         configuration.preferences.elementFullscreenEnabled = YES;
+         configuration.preferences._allowsPictureInPictureMediaPlayback = YES;
+         configuration.preferences._developerExtrasEnabled = YES;

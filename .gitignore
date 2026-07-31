@@ -1,0 +1,5 @@
+.DS_Store
+WebKit/
+captures/
+__pycache__/
+.metal-web-capture-port
