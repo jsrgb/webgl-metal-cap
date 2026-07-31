@@ -30,3 +30,8 @@ The command prints the saved trace path. Open it with:
 ```zsh
 open -a Xcode /path/to/capture.gputrace
 ```
+
+## Programmatic capture
+
+The blank page exposes `window.metalCapture.start()` and `await window.metalCapture.stop()`.
+They start a local recording and save a completed trace when stopped; no command count is required.

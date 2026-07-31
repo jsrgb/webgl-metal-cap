@@ -44,4 +44,4 @@ if (( failures )); then
   exit 1
 fi
 
-print "\nReady. Run ./run.command, wait for the animated field, then run ./capture.command 3 in a second terminal."
+print "\nReady. Run ./run.command, then use window.metalCapture.start() and stop() from your app or DevTools."

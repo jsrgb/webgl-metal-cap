@@ -7,6 +7,7 @@ import argparse
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from datetime import datetime
 from http import HTTPStatus
@@ -19,6 +20,9 @@ CAPTURES = ROOT / "captures"
 APP = ROOT / "app.html"
 WEBKIT_TRACE_DIR = Path(tempfile.gettempdir()) / "com.apple.WebKit.GPU+org.webkit.MiniBrowser"
 CLOCK_READY_AT = 0.0
+CAPTURE_WINDOW_SUBMITS = 1_000_000  # A safety ceiling; stop() normally ends it first.
+CAPTURE_SESSION = None
+CAPTURE_LOCK = threading.Lock()
 
 
 def trace_paths():
@@ -73,7 +77,9 @@ class Handler(SimpleHTTPRequestHandler):
             self.wfile.write(data)
             return
         if path == "/api/status":
-            self.send_json(HTTPStatus.OK, {"captureClockReady": bool(CLOCK_READY_AT)})
+            with CAPTURE_LOCK:
+                recording = CAPTURE_SESSION is not None
+            self.send_json(HTTPStatus.OK, {"captureClockReady": bool(CLOCK_READY_AT), "recording": recording})
             return
         return super().do_GET()
 
@@ -83,6 +89,10 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/clock-ready":
             CLOCK_READY_AT = time.time()
             self.send_json(HTTPStatus.NO_CONTENT, {})
+        elif path == "/api/capture/start":
+            self.start_capture()
+        elif path == "/api/capture/stop":
+            self.stop_capture()
         elif path == "/api/capture":
             self.capture(self.command_count())
         else:
@@ -97,6 +107,10 @@ class Handler(SimpleHTTPRequestHandler):
             return 3
 
     def capture(self, commands):
+        with CAPTURE_LOCK:
+            if CAPTURE_SESSION is not None:
+                self.send_json(HTTPStatus.CONFLICT, {"error": "A start()/stop() recording is already active."})
+                return
         if not CLOCK_READY_AT:
             self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "WebGPU capture clock is not ready. Reload the lab with ./run.command."})
             return
@@ -122,6 +136,63 @@ class Handler(SimpleHTTPRequestHandler):
         if not wait_until_complete(trace):
             self.send_json(HTTPStatus.GATEWAY_TIMEOUT, {"error": "The trace did not finish writing in time."})
             return
+        self.save_trace(trace)
+
+    def start_capture(self):
+        global CAPTURE_SESSION
+        if not CLOCK_READY_AT:
+            self.send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "WebGPU capture clock is not ready. Reload the lab with ./run.command."})
+            return
+        with CAPTURE_LOCK:
+            if CAPTURE_SESSION is not None:
+                self.send_json(HTTPStatus.CONFLICT, {"error": "A recording is already active."})
+                return
+            before = trace_paths()
+            started = time.time()
+            try:
+                subprocess.run(["notifyutil", "-s", "com.apple.WebKit.WebGPU.CaptureFrame", str(CAPTURE_WINDOW_SUBMITS)], check=True)
+                subprocess.run(["notifyutil", "-p", "com.apple.WebKit.WebGPU.CaptureFrame"], check=True)
+            except (OSError, subprocess.CalledProcessError) as error:
+                self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
+                return
+            CAPTURE_SESSION = {"before": before, "started": started}
+        self.send_json(HTTPStatus.OK, {"recording": True})
+
+    def stop_capture(self):
+        global CAPTURE_SESSION
+        with CAPTURE_LOCK:
+            session = CAPTURE_SESSION
+            if session is None:
+                self.send_json(HTTPStatus.CONFLICT, {"error": "No recording is active."})
+                return
+        try:
+            # WebKit's existing capture hook closes an active trace after this
+            # next submission. This is the compatible stop mechanism; it does
+            # not need another private notification or another browser rebuild.
+            subprocess.run(["notifyutil", "-s", "com.apple.WebKit.WebGPU.CaptureFrame", "1"], check=True)
+            subprocess.run(["notifyutil", "-p", "com.apple.WebKit.WebGPU.CaptureFrame"], check=True)
+        except (OSError, subprocess.CalledProcessError) as error:
+            self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
+            return
+        deadline = time.monotonic() + 20
+        trace = None
+        while time.monotonic() < deadline:
+            candidates = [p for p in trace_paths() - session["before"] if p.stat().st_mtime >= session["started"] - 1]
+            if candidates:
+                trace = max(candidates, key=lambda p: p.stat().st_mtime)
+                break
+            time.sleep(.25)
+        if not trace:
+            self.send_json(HTTPStatus.GATEWAY_TIMEOUT, {"error": "No trace arrived. Is MiniBrowser running the preview?"})
+            return
+        if not wait_until_complete(trace):
+            self.send_json(HTTPStatus.GATEWAY_TIMEOUT, {"error": "The trace did not finish writing in time."})
+            return
+        with CAPTURE_LOCK:
+            CAPTURE_SESSION = None
+        self.save_trace(trace)
+
+    def save_trace(self, trace):
         CAPTURES.mkdir(exist_ok=True)
         name = f"capture-{datetime.now().strftime('%Y%m%d-%H%M%S')}.gputrace"
         staging = CAPTURES / f".{name}.partial"
@@ -130,8 +201,11 @@ class Handler(SimpleHTTPRequestHandler):
             shutil.rmtree(staging)
             self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Trace finished without an Xcode index."})
             return
-        staging.replace(CAPTURES / name)  # Xcode can only see a completed trace.
-        self.send_json(HTTPStatus.OK, {"name": name, "path": str((CAPTURES / name).resolve())})
+        destination = CAPTURES / name
+        staging.replace(destination)  # Xcode can only see a completed trace.
+        path = str(destination.resolve())
+        print(f"Saved GPU trace: {path}", flush=True)
+        self.send_json(HTTPStatus.OK, {"name": name, "path": path})
 
 
 if __name__ == "__main__":

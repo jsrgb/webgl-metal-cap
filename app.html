@@ -1,73 +1,98 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WebGL Field — Medium</title>
-<style>html,body,canvas{width:100%;height:100%;margin:0;display:block;overflow:hidden;background:#071224}</style>
-<canvas id="field"></canvas>
-<script type="module">
-  // A self-contained, medium-density WebGL2 field: 32,768 animated grass blades.
-  // It is inspired by https://webglsamples.org/field/field.html, but deliberately
-  // avoids external libraries and assets so this lab stays clone-and-run simple.
-  const canvas = document.querySelector('#field');
-  const gl = canvas.getContext('webgl2', { antialias: false, depth: true });
-  if (!gl) throw new Error('WebGL2 is required');
-  const compile = (type, source) => {
-    const shader = gl.createShader(type); gl.shaderSource(shader, source); gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
-    return shader;
-  };
-  const program = gl.createProgram();
-  gl.attachShader(program, compile(gl.VERTEX_SHADER, `#version 300 es
-    precision highp float;
-    uniform float time, aspect;
-    out float shade;
-    float hash(float n) { return fract(sin(n) * 43758.5453123); }
-    void main() {
-      float id = float(gl_VertexID), columns = 256.;
-      float x = mod(id, columns) / columns * 2. - 1.;
-      float z = floor(id / columns) / columns * 2. - 1.;
-      float depth = z * .5 + .5;
-      float wave = sin(time * 1.5 + x * 9. + z * 7.) * (.025 + .04 * depth);
-      float y = wave + hash(id) * .035 - .28;
-      vec3 p = vec3(x * 1.45, y, z * .8 - .2);
-      p.y += .16 * (1. - depth);
-      p.x += wave * (1. - depth) * 3.;
-      gl_Position = vec4(p.x / aspect, p.y, p.z * .55, 1.);
-      gl_PointSize = mix(2.2, 8.5, 1. - depth);
-      shade = mix(.25, 1., 1. - depth) + hash(id * 3.) * .12;
-    }`));
-  gl.attachShader(program, compile(gl.FRAGMENT_SHADER, `#version 300 es
-    precision highp float;
-    in float shade; out vec4 color;
-    void main() {
-      vec2 uv = gl_PointCoord * 2. - 1.;
-      if (abs(uv.x) > .23 || uv.y < -.92) discard;
-      float tip = smoothstep(1., -.7, uv.y);
-      color = vec4(vec3(.05, .32, .09) * shade * tip + vec3(.03, .14, .04), 1.);
-    }`));
-  gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
-  const time = gl.getUniformLocation(program, 'time');
-  const aspect = gl.getUniformLocation(program, 'aspect');
-  const resize = () => {
-    const maxPixels = 2_000_000; // Medium capture workload, even on 4K/5K desktops.
-    const dpr = Math.min(devicePixelRatio, Math.sqrt(maxPixels / (innerWidth * innerHeight)));
-    canvas.width = Math.round(innerWidth * dpr); canvas.height = Math.round(innerHeight * dpr);
-    gl.viewport(0, 0, canvas.width, canvas.height);
-  };
-  addEventListener('resize', resize); resize();
-  gl.useProgram(program); gl.enable(gl.DEPTH_TEST); gl.clearColor(.025, .08, .16, 1);
-  const draw = (ms) => { gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT); gl.uniform1f(time, ms * .001); gl.uniform1f(aspect, canvas.width / canvas.height); gl.drawArrays(gl.POINTS, 0, 32768); requestAnimationFrame(draw); };
-  requestAnimationFrame(draw);
+<title>Chicago ArcGIS WebGL Capture</title>
+<style>html,body,arcgis-map{width:100%;height:100%;margin:0;display:block;overflow:hidden;background:#08111e}</style>
 
-  // This is only WebKit's capture clock. The workload above remains WebGL2.
+<script type="module" src="https://js.arcgis.com/5.1/"></script>
+<arcgis-map id="view" basemap="topo-vector" center="-87.6298,41.8781" zoom="11"></arcgis-map>
+
+<script type="module">
+  const view = document.querySelector('#view');
+  let captureTick = null;
+  const captureRequest = async (path) => {
+    const response = await fetch(path, { method: 'POST' });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `Capture request failed (${response.status})`);
+    return result;
+  };
+
+  // No UI is added: call these from your app, DevTools, or an automation harness.
+  // start() opens the capture; stop() finalizes it and resolves with its saved path.
+  window.metalCapture = Object.freeze({
+    start: async () => {
+      const result = await captureRequest('/api/capture/start');
+      captureTick?.(); // Begin the native Metal trace before the next app operation.
+      return result;
+    },
+    stop: () => captureRequest('/api/capture/stop'),
+    status: async () => (await fetch('/api/status')).json(),
+  });
+  const waitForCaptureClock = async () => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if ((await window.metalCapture.status()).captureClockReady) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error('The Metal capture clock did not become ready.');
+  };
+
+  view.addEventListener('arcgisViewReadyChange', () => {
+    const points = [
+      [-87.6298, 41.8781, '#f97316'], // Loop
+      [-87.6207, 41.8902, '#22c55e'], // River North
+      [-87.6476, 41.8925, '#38bdf8'], // Wicker Park
+      [-87.6064, 41.8610, '#e879f9'], // Near South Side
+      [-87.6675, 41.8740, '#facc15'], // West Loop
+    ];
+    for (const [longitude, latitude, color] of points) {
+      view.graphics.add({
+        geometry: { type: 'point', longitude, latitude },
+        symbol: {
+          type: 'simple-marker', style: 'circle', color,
+          size: 16, outline: { color: '#ffffff', width: 2 },
+        },
+      });
+    }
+
+    setTimeout(async () => {
+      const screenRect = {
+        x: Math.round(view.clientWidth * 0.35),
+        y: Math.round(view.clientHeight * 0.35),
+        width: Math.round(view.clientWidth * 0.30),
+        height: Math.round(view.clientHeight * 0.30),
+      };
+      let recording = false;
+      try {
+        await waitForCaptureClock();
+        await window.metalCapture.start();
+        recording = true;
+        const hitTestResult = await view.hitTest(screenRect);
+        window.latestHitTest = hitTestResult;
+        console.info('ScreenRect hitTest result:', hitTestResult);
+      } finally {
+        if (recording) {
+          const trace = await window.metalCapture.stop();
+          window.latestHitTestTrace = trace.path;
+          console.info(`Saved GPU trace: ${trace.path}`);
+        }
+      }
+    }, 1000);
+  }, { once: true });
+
+  // This only arms WebKit's trace switch. ArcGIS itself renders via WebGL.
   if (navigator.gpu) {
     const adapter = await navigator.gpu.requestAdapter();
     const device = await adapter?.requestDevice();
     if (device) {
       const module = device.createShaderModule({ code: '@compute @workgroup_size(1) fn main() {}' });
       const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
-      const tick = () => { const encoder = device.createCommandEncoder({ label: 'capture-trigger' }); const pass = encoder.beginComputePass({ label: 'capture-trigger pass' }); pass.setPipeline(pipeline); pass.dispatchWorkgroups(1); pass.end(); device.queue.submit([encoder.finish()]); };
+      const tick = () => {
+        const encoder = device.createCommandEncoder({ label: 'capture-trigger' });
+        const pass = encoder.beginComputePass({ label: 'capture-trigger pass' });
+        pass.setPipeline(pipeline); pass.dispatchWorkgroups(1); pass.end();
+        device.queue.submit([encoder.finish()]);
+      };
+      captureTick = tick;
       setInterval(tick, 16);
       tick();
       fetch('/api/clock-ready', { method: 'POST' }).catch(() => {});
